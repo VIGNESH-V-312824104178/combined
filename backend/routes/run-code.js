@@ -27,30 +27,43 @@ router.post('/', async function (req, res) {
     let exitCode = 0;
 
     if (compiler.startsWith('cpp')) {
-      // Use Wandbox for C++ (mirrors compil's approach)
-      const wandboxRes = await fetch('https://wandbox.org/api/compile.json', {
+      // Use Godbolt for C++ (Wandbox is currently returning HTTP 500)
+      const godboltRes = await fetch('https://godbolt.org/api/compiler/g142/compile', {
         method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
         body: JSON.stringify({
-          compiler: 'gcc-head',
-          code:     code,
-          stdin:    input || '',
-          'compiler-option-raw': '-O2\n-std=c++23'
+          source: code,
+          options: {
+            userArguments: '-O2 -std=c++23',
+            executeParameters: { args: [], stdin: input || '' },
+            compilerOptions: { executorRequest: true },
+            filters: { execute: true },
+            tools: []
+          },
+          lang: 'c++',
+          allowStoreCodeDebug: true
         }),
         timeout: 15000
       });
 
-      if (!wandboxRes.ok) {
-        return res.status(wandboxRes.status).json({
-          error: 'Wandbox API error: HTTP ' + wandboxRes.status
+      if (!godboltRes.ok) {
+        return res.status(godboltRes.status).json({
+          error: 'Compiler API error: HTTP ' + godboltRes.status
         });
       }
 
-      const data = await wandboxRes.json();
-      // Wandbox status '0' means success
-      output   = data.program_output || data.compiler_output || '';
-      error    = data.program_error  || data.compiler_error  || '';
-      exitCode = (data.status === '0' || data.status === 0) ? 0 : 1;
+      const data = await godboltRes.json();
+      
+      const buildErr = data.buildResult && data.buildResult.stderr ? data.buildResult.stderr.map(e => e.text).join('\n') : '';
+      const execOut = data.stdout ? data.stdout.map(o => o.text).join('\n') : '';
+      const execErr = data.stderr ? data.stderr.map(e => e.text).join('\n') : '';
+      
+      output = execOut;
+      error = buildErr || execErr;
+      exitCode = data.code === 0 ? 0 : 1;
 
     } else if (compiler.startsWith('python')) {
       const result = spawnSync('python', ['-c', code], {
