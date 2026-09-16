@@ -163,7 +163,8 @@
 
     // Subscription
     var status = p.subscription_status || 'inactive';
-    var isActive = status === 'active';
+    var expiry = p.subscription_expiry;
+    var isActive = status === 'active' && expiry && new Date(expiry) > new Date();
     document.getElementById('sub-plan').textContent      = isActive ? 'Pro (&#8377;1/month)' : 'Free';
     document.getElementById('sub-plan').innerHTML        = isActive ? 'Pro (&#8377;1/month)' : 'Free';
     document.getElementById('sub-status').textContent    = status.charAt(0).toUpperCase() + status.slice(1);
@@ -230,6 +231,8 @@
       try {
         await FirebaseClient.signOut();
       } catch (_) {
+        console.error('Logout error', _);
+      } finally {
         window.location.replace('/index.html');
       }
     });

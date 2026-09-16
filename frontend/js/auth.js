@@ -84,6 +84,8 @@
       try {
         await FirebaseClient.signOut();
       } catch (_) {
+        console.error('Logout error', _);
+      } finally {
         window.location.replace('/index.html');
       }
     });
