@@ -49,15 +49,30 @@ Make sure your entire output is just valid JSON, possibly inside a markdown code
   try {
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({
-      model: 'gemini-3.1-flash-lite',
+      model: 'gemini-2.0-flash',
       generationConfig: {
         temperature:     0.2,
         maxOutputTokens: 2500,
       }
     });
 
-    const result = await model.generateContent(prompt);
+    // Retry up to 3 times on 503 (model overloaded)
+    let result;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        result = await model.generateContent(prompt);
+        break;
+      } catch (retryErr) {
+        const is503 = retryErr.message && retryErr.message.includes('503');
+        if (is503 && attempt < 2) {
+          await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt)));
+          continue;
+        }
+        throw retryErr;
+      }
+    }
     const text   = result.response.text();
+
 
     let parsed = { summary: '', testCases: [] };
     try {
