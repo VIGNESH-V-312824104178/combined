@@ -135,7 +135,7 @@ router.post('/', requireSubscription, async function (req, res) {
   // ── Call Gemini ───────────────────────────────────────────
   try {
     const genAI = new GoogleGenerativeAI(GEMINI_KEY);
-    const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-3.6-flash' });
 
     const result = await model.generateContent(prompt);
     const text   = result.response.text();
