@@ -126,7 +126,7 @@ ${code}
 
   try {
     const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-3.6-flash' });
 
     // Stream the response back as plain text chunks
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
