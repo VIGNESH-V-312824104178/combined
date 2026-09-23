@@ -138,6 +138,7 @@
   'use strict';
 
   const CHARTS_SERVICE = '';  // relative path — /generate-charts proxied via Vercel
+  const CACHE_KEY = 'cf_dashboard_cache';
   let _userId   = null;
   let _profile  = null;
   let _userRating = 1200;
@@ -160,7 +161,10 @@
       _showHandleSetup();
     } else {
       _showDashboard(_profile.cf_handle);
-      _loadCachedData();
+      // Try sessionStorage first for instant load, fall back to Firestore
+      if (!_loadFromSessionCache()) {
+        _loadCachedData();
+      }
     }
 
     _wireButtons();
@@ -253,12 +257,54 @@
     }
   }
 
-  // ── Load cached data from Supabase ───────────────────────
+  // ── Session cache helpers ─────────────────────────────────
+  function _saveToSessionCache(data) {
+    try {
+      sessionStorage.setItem(CACHE_KEY + '_' + _userId, JSON.stringify(data));
+    } catch (_) { /* quota exceeded or private mode — silently skip */ }
+  }
+
+  function _loadFromSessionCache() {
+    try {
+      var raw = sessionStorage.getItem(CACHE_KEY + '_' + _userId);
+      if (!raw) return false;
+      var cache = JSON.parse(raw);
+      if (!cache || !cache.snapshots || cache.snapshots.length === 0) return false;
+
+      // Restore weakness table
+      _renderWeaknessTable(cache.snapshots);
+
+      // Restore streak
+      if (cache.streak) {
+        document.getElementById('streak-current').textContent      = cache.streak.current;
+        document.getElementById('streak-longest').textContent      = cache.streak.longest;
+        document.getElementById('streak-total-solved').textContent = cache.streak.totalSolved;
+      }
+
+      // Restore rating display
+      if (cache.ratingDisplay) {
+        document.getElementById('rating-display').textContent = cache.ratingDisplay;
+      }
+
+      // Restore recommendations HTML directly
+      if (cache.recsHtml) {
+        document.getElementById('recs-body').innerHTML = cache.recsHtml;
+      }
+
+      _setStatus('Showing cached data from this session. Click "\u21BB Sync CF Data" to refresh.');
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // ── Load cached data from Firestore ──────────────────────
   async function _loadCachedData() {
     try {
       const snapshots = await FirebaseClient.getLatestSnapshot(_userId);
       if (snapshots && snapshots.length > 0) {
         _renderWeaknessTable(snapshots);
+        _saveToSessionCache({ snapshots: snapshots });
         _setStatus('Showing cached data. Click "Sync CF Data" to refresh.');
       } else {
         _clearWeaknessTable();
@@ -334,6 +380,7 @@
 
       // 6. Recommendations
       const weakTags = WeaknessEngine.getTop5WeakestTags(tagScores);
+      var recsHtml = '';
       if (weakTags.length > 0) {
         _setSyncProgress('Fetching recommended problems (downloading problemset ~3MB)...');
         try {
@@ -342,11 +389,30 @@
             weakTags, _userRating, solvedSet, problemset, tagScores
           );
           _renderRecommendations(recs, weakTags, tagScores);
+          recsHtml = document.getElementById('recs-body').innerHTML;
         } catch (recErr) {
           document.getElementById('recs-body').innerHTML =
             '<p class="loading-text" style="padding:8px;">Could not fetch recommendations: ' + recErr.message + '</p>';
         }
       }
+
+      // Save everything to sessionStorage for instant loads on tab switches
+      var tableData = tagScores.map(function (ts) {
+        return {
+          tag: ts.tag,
+          weakness_score: ts.weaknessScore,
+          failure_rate: ts.failureRate,
+          attempted_count: ts.attemptedCount,
+          failed_count: ts.failedCount,
+          bias_score: biasScores.get(ts.tag) || 0
+        };
+      });
+      _saveToSessionCache({
+        snapshots:     tableData,
+        streak:        { current: streak.current, longest: streak.longest, totalSolved: solvedSet.size },
+        ratingDisplay: document.getElementById('rating-display').textContent,
+        recsHtml:      recsHtml
+      });
 
       _setSyncProgress(null);
       _setStatus('Last synced: ' + new Date().toLocaleTimeString());

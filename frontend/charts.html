@@ -183,19 +183,46 @@
     '#c49c94','#f7b6d2','#c7c7c7','#dbdb8d','#9edae5'
   ];
 
-  var _biasChart    = null;
-  var _weakChart    = null;
-  var _session      = null;
+  var CACHE_KEY    = 'cf_charts_cache';
+  var _biasChart   = null;
+  var _weakChart   = null;
+  var _session     = null;
 
   window.addEventListener('DOMContentLoaded', async function () {
     _session = await Auth.initPage(true);
     if (!_session) return;
 
-    document.getElementById('refresh-btn').addEventListener('click', loadCharts);
-    loadCharts();
+    document.getElementById('refresh-btn').addEventListener('click', function () {
+      loadCharts(true); // true = force refresh, skip cache
+    });
+
+    // Try instant render from sessionStorage first
+    if (!_loadFromSessionCache()) {
+      loadCharts(false);
+    }
   });
 
-  async function loadCharts() {
+  function _saveToSessionCache(rows) {
+    try {
+      sessionStorage.setItem(CACHE_KEY + '_' + _session.user.id, JSON.stringify(rows));
+    } catch (_) { /* quota or private mode — skip */ }
+  }
+
+  function _loadFromSessionCache() {
+    try {
+      var raw = sessionStorage.getItem(CACHE_KEY + '_' + _session.user.id);
+      if (!raw) return false;
+      var rows = JSON.parse(raw);
+      if (!rows || rows.length === 0) return false;
+      _renderCharts(rows);
+      setStatus('Charts loaded from session cache — click Refresh to update.');
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function loadCharts(forceRefresh) {
     var btn = document.getElementById('refresh-btn');
     btn.disabled = true;
     setStatus('Fetching data...');
@@ -213,25 +240,8 @@
         return;
       }
 
-      // Sort rows by weakness_score descending for better viz
-      var byWeakness = rows.slice().sort(function (a, b) {
-        return (b.weakness_score || 0) - (a.weakness_score || 0);
-      });
-      var byAttempted = rows.slice().sort(function (a, b) {
-        return (b.attempted_count || 0) - (a.attempted_count || 0);
-      });
-
-      renderBiasPie(byAttempted);
-      renderWeaknessPie(byWeakness);
-
-      // Show snapshot date
-      if (rows[0] && rows[0].snapshot_date) {
-        document.getElementById('chart-ts').textContent =
-          'Snapshot: ' + new Date(rows[0].snapshot_date).toLocaleDateString('en-IN', {
-            day: 'numeric', month: 'short', year: 'numeric'
-          });
-      }
-
+      _saveToSessionCache(rows);
+      _renderCharts(rows);
       setStatus('Charts loaded — ' + rows.length + ' tags.');
     } catch (err) {
       setStatus('Error: ' + err.message, true);
@@ -240,6 +250,27 @@
     }
 
     btn.disabled = false;
+  }
+
+  function _renderCharts(rows) {
+    // Sort rows by weakness_score descending for better viz
+    var byWeakness = rows.slice().sort(function (a, b) {
+      return (b.weakness_score || 0) - (a.weakness_score || 0);
+    });
+    var byAttempted = rows.slice().sort(function (a, b) {
+      return (b.attempted_count || 0) - (a.attempted_count || 0);
+    });
+
+    renderBiasPie(byAttempted);
+    renderWeaknessPie(byWeakness);
+
+    // Show snapshot date
+    if (rows[0] && rows[0].snapshot_date) {
+      document.getElementById('chart-ts').textContent =
+        'Snapshot: ' + new Date(rows[0].snapshot_date).toLocaleDateString('en-IN', {
+          day: 'numeric', month: 'short', year: 'numeric'
+        });
+    }
   }
 
   /* ── Bias Pie Chart (practice distribution by attempted_count) ── */
