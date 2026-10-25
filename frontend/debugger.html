@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Submission Debugger — CF Weakness Tracker</title>
+  <meta name="description" content="Paste a Codeforces submission and get an AI diagnosis: root cause, suspect lines, and counter-tests that break your solution.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/css/style.css">
+  <link rel="stylesheet" href="/css/features.css">
+</head>
+<body>
+
+<nav class="navbar" role="navigation" aria-label="Main navigation">
+  <div class="nav-inner">
+    <div class="nav-logo"><a href="/dashboard.html">CF Weakness Tracker</a></div>
+    <button class="hamburger" id="hamburger-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+    <ul class="nav-links" id="nav-links">
+      <li><a href="/dashboard.html">Dashboard</a></li>
+      <li><a href="/charts.html">Weakness Charts</a></li>
+      <li><a href="/compiler.html">Compiler</a></li>
+      <li><a href="/gym.html">Gym</a></li>
+      <li><a href="/algorithms.html">Algorithms</a></li>
+      <li><a href="/debugger.html">Debugger</a></li>
+      <li><a href="/subscription.html">Subscription</a></li>
+      <li><a href="/profile.html">Profile</a></li>
+      <li><a href="#" id="logout-btn">Logout</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main class="container">
+  <div class="page-head">
+    <h1>Submission Debugger</h1>
+    <p>Got Wrong Answer on test 4 and no idea why? Paste the submission link. We pull your code and verdict, then find the likely bug and build inputs that break it.</p>
+  </div>
+
+  <div id="dbg-msg" class="msg-info" style="display:none;"></div>
+
+  <div class="panel">
+    <div class="panel-title">Submission</div>
+    <div class="panel-body">
+      <div class="toolbar-row">
+        <input type="text" id="sub-url" style="flex:1;min-width:260px;"
+               placeholder="https://codeforces.com/contest/1234/submission/56789012">
+        <button type="button" id="go-btn" class="btn-primary">Diagnose</button>
+        <button type="button" id="manual-toggle">Paste code instead</button>
+      </div>
+
+      <div id="manual-box" style="display:none;margin-top:14px;">
+        <div class="toolbar-row" style="margin-bottom:8px;">
+          <select id="m-verdict">
+            <option value="Wrong answer">Wrong answer</option>
+            <option value="Time limit exceeded">Time limit exceeded</option>
+            <option value="Runtime error">Runtime error</option>
+            <option value="Memory limit exceeded">Memory limit exceeded</option>
+          </select>
+          <input type="number" id="m-test" min="1" placeholder="Failed on test #" style="width:150px;">
+          <input type="text" id="m-problem" placeholder="Problem URL (optional but helps a lot)" style="flex:1;min-width:240px;">
+        </div>
+        <textarea id="m-code" class="mono" placeholder="Paste your code here…"></textarea>
+      </div>
+    </div>
+  </div>
+
+  <div id="result" style="display:none;">
+    <div class="toolbar-row" style="margin-bottom:12px;">
+      <h2 id="r-title" style="font-size:17px;"></h2>
+      <span id="r-verdict"></span>
+      <span class="spacer"></span>
+      <button type="button" id="open-compiler-btn" class="btn-primary">Open in Compiler with counter-tests</button>
+    </div>
+    <div class="dbg-layout">
+      <div>
+        <div class="code-view" id="code-view"></div>
+      </div>
+      <div id="findings"></div>
+    </div>
+  </div>
+
+  <div class="panel" id="history-panel" style="display:none;margin-top:16px;">
+    <div class="panel-title">Recent diagnoses</div>
+    <div class="panel-body" id="history"></div>
+  </div>
+</main>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<script src="/js/firebase-client.js"></script>
+<script src="/js/cf-api.js"></script>
+<script src="/js/cf-store.js"></script>
+<script src="/js/auth.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  const esc = CFStore.esc;
+  const LAST_KEY = 'dbg_last';
+  const HIST_KEY = 'dbg_history';
+  let _handle = '';
+  let _current = null;
+
+  /* ── tiny, safe markdown (escape first, then format) ─────── */
+  function md(src) {
+    let s = esc(src || '');
+    s = s.replace(/```[a-zA-Z]*\n?([\s\S]*?)```/g, function (_, c) { return '<pre>' + c.trim() + '</pre>'; });
+    s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+    s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+    return s.split(/\n{2,}/).map(function (p) {
+      return /^<pre>/.test(p) ? p : '<p>' + p.replace(/\n/g, '<br>') + '</p>';
+    }).join('');
+  }
+
+  function _msg(text, type) { text ? Auth.showMsg('dbg-msg', text, type) : Auth.hideMsg('dbg-msg'); }
+
+  function _parseRef(input) {
+    input = (input || '').trim();
+    let m = input.match(/(?:contest|gym)\/(\d+)\/submission\/(\d+)/i) ||
+            input.match(/problemset\/submission\/(\d+)\/(\d+)/i) ||
+            input.match(/^(\d+)\s*[\/ ,]\s*(\d+)$/);
+    return m ? { contestId: m[1], submissionId: m[2] } : null;
+  }
+
+  function _compilerLang(l) {
+    l = (l || '').toLowerCase();
+    if (l.indexOf('py') !== -1) return 'python-3.14';
+    if (l.indexOf('node') !== -1 || l.indexOf('javascript') !== -1) return 'deno';
+    return 'cpp-g++-15';
+  }
+
+  /* ── Try to enrich with official API data (own submissions) ── */
+  async function _lookupMeta(ref) {
+    if (!_handle) return {};
+    try {
+      const list = await CFApi.fetchContestStatus(ref.contestId, _handle);
+      const s = list.find(function (x) { return String(x.id) === ref.submissionId; });
+      if (!s) return {};
+      return {
+        verdict: (s.verdict || '').replace(/_/g, ' ').toLowerCase(),
+        passedTestCount: s.passedTestCount,
+        language: s.programmingLanguage,
+        problemUrl: 'https://codeforces.com/contest/' + s.problem.contestId + '/problem/' + s.problem.index
+      };
+    } catch (_) { return {}; }
+  }
+
+  async function _post(body) {
+    const resp = await fetch(CFStore.backend + '/api/debug-submission', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    const data = await resp.json().catch(function () { return {}; });
+    return { ok: resp.ok, status: resp.status, data: data };
+  }
+
+  async function _diagnose() {
+    const btn = document.getElementById('go-btn');
+    const manualOpen = document.getElementById('manual-box').style.display !== 'none';
+    const body = {};
+
+    if (manualOpen && document.getElementById('m-code').value.trim()) {
+      body.code            = document.getElementById('m-code').value;
+      body.verdict         = document.getElementById('m-verdict').value;
+      body.passedTestCount = document.getElementById('m-test').value ? Number(document.getElementById('m-test').value) - 1 : undefined;
+      body.problemUrl      = document.getElementById('m-problem').value.trim();
+    } else {
+      const ref = _parseRef(document.getElementById('sub-url').value);
+      if (!ref) { _msg('Paste a link like codeforces.com/contest/1234/submission/56789012 (or "1234/56789012").', 'warn'); return; }
+      Object.assign(body, ref);
+      _msg('Fetching submission details…', 'info');
+      Object.assign(body, await _lookupMeta(ref));
+    }
+
+    btn.disabled = true;
+    _msg('Analysing your solution… this takes a few seconds.', 'info');
+    try {
+      const r = await _post(body);
+      if (r.status === 422 && r.data.needManual) {
+        document.getElementById('manual-box').style.display = 'block';
+        _msg(r.data.error, 'warn');
+        return;
+      }
+      if (!r.ok) throw new Error(r.data.error || ('HTTP ' + r.status));
+      _msg('');
+      _current = r.data;
+      _current.at = Date.now();
+      try { sessionStorage.setItem(LAST_KEY, JSON.stringify(_current)); } catch (_) {}
+      _pushHistory(_current);
+      _render(_current);
+    } catch (e) {
+      _msg('Diagnosis failed: ' + e.message, 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  /* ── rendering ───────────────────────────────────────────── */
+  function _render(r) {
+    const a = r.analysis || {};
+    const sus = {};
+    (a.suspect_lines || []).forEach(function (s) { sus[s.line] = s.reason; });
+
+    const lines = (r.code || '').split('\n');
+    document.getElementById('code-view').innerHTML = lines.map(function (l, i) {
+      const n = i + 1;
+      return '<div class="ln' + (sus[n] ? ' sus' : '') + '"><span class="n">' + n + '</span><span class="t">' + esc(l) + '</span></div>' +
+             (sus[n] ? '<div class="sus-note" style="padding-left:56px;background:#FEF2F2;">&uarr; ' + esc(sus[n]) + '</div>' : '');
+    }).join('');
+
+    document.getElementById('r-title').textContent = r.problemTitle || 'Your submission';
+    const bad = /accepted|^ok$/i.test(r.verdict || '') ? 'chip-ok' : 'chip-bad';
+    document.getElementById('r-verdict').innerHTML = r.verdict ? '<span class="chip ' + bad + '">' + esc(r.verdict) + '</span>' : '';
+
+    const cx = a.complexity || {};
+    const tests = (a.counter_tests || []).map(function (t, i) {
+      return '<div class="ctest"><strong>Test ' + (i + 1) + '</strong> — ' + esc(t.why || '') +
+        '<div class="loading-text" style="font-style:normal;">Input</div><pre>' + esc(t.input) + '</pre>' +
+        (t.expected ? '<div class="loading-text" style="font-style:normal;">Expected</div><pre>' + esc(t.expected) + '</pre>' : '') + '</div>';
+    }).join('');
+
+    document.getElementById('findings').innerHTML =
+      '<div class="finding"><h4>Verdict</h4><p style="font-size:13.5px;">' + esc(a.verdict_explained || '') + '</p>' +
+        '<div class="toolbar-row" style="margin-top:6px;">' +
+          '<span class="chip chip-warn">' + esc(a.category || 'Unknown') + '</span>' +
+          '<span class="chip">' + (Number(a.confidence) || 0) + '% confident</span>' +
+          (cx.yours ? '<span class="chip ' + (cx.ok === false ? 'chip-bad' : 'chip-ok') + '">yours ' + esc(cx.yours) + ' / needed ' + esc(cx.needed || '?') + '</span>' : '') +
+        '</div></div>' +
+      '<div class="finding"><h4>Root cause</h4><div class="md">' + md(a.root_cause) + '</div></div>' +
+      '<div class="finding"><h4>How to fix</h4><div class="md">' + md(a.fix_hint) + '</div></div>' +
+      '<div class="finding"><h4>Counter-tests</h4>' + (tests || '<p class="loading-text">None generated.</p>') +
+        '<p class="loading-text" style="margin-top:4px;">AI-generated: double-check expected outputs by hand before trusting them.</p></div>';
+
+    document.getElementById('result').style.display = 'block';
+  }
+
+  /* ── history ─────────────────────────────────────────────── */
+  function _pushHistory(r) {
+    let h = [];
+    try { h = JSON.parse(localStorage.getItem(HIST_KEY)) || []; } catch (_) {}
+    h.unshift(r);
+    h = h.slice(0, 8);
+    try { localStorage.setItem(HIST_KEY, JSON.stringify(h)); } catch (_) {}
+    _renderHistory();
+  }
+
+  function _renderHistory() {
+    let h = [];
+    try { h = JSON.parse(localStorage.getItem(HIST_KEY)) || []; } catch (_) {}
+    document.getElementById('history-panel').style.display = h.length ? 'block' : 'none';
+    document.getElementById('history').innerHTML = h.map(function (r, i) {
+      return '<div class="toolbar-row" style="padding:6px 0;border-bottom:1px solid var(--border-light);">' +
+        '<strong style="font-size:13px;">' + esc(r.problemTitle || 'Pasted code') + '</strong>' +
+        '<span class="chip">' + esc((r.analysis && r.analysis.category) || '') + '</span>' +
+        '<span class="loading-text">' + new Date(r.at).toLocaleString() + '</span>' +
+        '<span class="spacer"></span><button type="button" data-open="' + i + '">View</button></div>';
+    }).join('');
+  }
+
+  /* ── boot ────────────────────────────────────────────────── */
+  window.addEventListener('DOMContentLoaded', async function () {
+    const session = await Auth.initPage(true);
+    if (!session) return;
+    try { _handle = await CFStore.getHandle(session); } catch (_) {}
+
+    document.getElementById('go-btn').addEventListener('click', _diagnose);
+    document.getElementById('sub-url').addEventListener('keydown', function (e) { if (e.key === 'Enter') _diagnose(); });
+    document.getElementById('manual-toggle').addEventListener('click', function () {
+      const box = document.getElementById('manual-box');
+      box.style.display = box.style.display === 'none' ? 'block' : 'none';
+    });
+
+    document.getElementById('open-compiler-btn').addEventListener('click', function () {
+      if (!_current) return;
+      const tcs = ((_current.analysis && _current.analysis.counter_tests) || []).map(function (t) {
+        return { input: t.input, expected: t.expected || '' };
+      });
+      CFStore.openInCompiler({ code: _current.code, language: _compilerLang(_current.language), testCases: tcs });
+    });
+
+    document.getElementById('history').addEventListener('click', function (e) {
+      const i = e.target.getAttribute('data-open');
+      if (i === null) return;
+      try {
+        _current = JSON.parse(localStorage.getItem(HIST_KEY))[Number(i)];
+        sessionStorage.setItem(LAST_KEY, JSON.stringify(_current));
+        _render(_current);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } catch (_) {}
+    });
+
+    _renderHistory();
+    // Restore last result when coming back from another tab
+    try {
+      const last = JSON.parse(sessionStorage.getItem(LAST_KEY));
+      if (last) { _current = last; _render(last); }
+    } catch (_) {}
+  });
+})();
+</script>
+</body>
+</html>

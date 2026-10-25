@@ -124,8 +124,20 @@
     return `${contestId}${index}`;
   }
 
+  /* ---------------------------------------------------------------
+     fetchContestStatus(contestId, handle)
+     Returns the handle's submissions within one contest (newest first).
+  --------------------------------------------------------------- */
+  async function fetchContestStatus(contestId, handle) {
+    return _apiFetch(
+      `${CF_BASE}/contest.status?contestId=${encodeURIComponent(contestId)}` +
+      `&handle=${encodeURIComponent(handle)}&from=1&count=1000`
+    );
+  }
+
   // ── Public API ────────────────────────────────────────────────
   global.CFApi = {
+    fetchContestStatus,
     fetchUserInfo,
     fetchSubmissions,
     fetchRatingHistory,

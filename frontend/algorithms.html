@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Algorithm Guide — CF Weakness Tracker</title>
+  <meta name="description" content="A competitive programming algorithm handbook: concise explanations, ready-to-paste C++ templates, and curated Codeforces and CSES practice problems for every topic.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <link rel="stylesheet" href="/css/style.css">
+  <link rel="stylesheet" href="/css/features.css">
+</head>
+<body>
+
+<nav class="navbar" role="navigation" aria-label="Main navigation">
+  <div class="nav-inner">
+    <div class="nav-logo"><a href="/dashboard.html">CF Weakness Tracker</a></div>
+    <button class="hamburger" id="hamburger-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+    <ul class="nav-links" id="nav-links">
+      <li><a href="/dashboard.html">Dashboard</a></li>
+      <li><a href="/charts.html">Weakness Charts</a></li>
+      <li><a href="/compiler.html">Compiler</a></li>
+      <li><a href="/gym.html">Gym</a></li>
+      <li><a href="/algorithms.html">Algorithms</a></li>
+      <li><a href="/debugger.html">Debugger</a></li>
+      <li><a href="/subscription.html">Subscription</a></li>
+      <li><a href="/profile.html">Profile</a></li>
+      <li><a href="#" id="logout-btn">Logout</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main class="container" style="max-width:1280px;">
+  <div class="algo-shell">
+    <aside class="algo-side" aria-label="Algorithm index">
+      <input type="search" id="algo-search" placeholder="Search algorithms…" aria-label="Search algorithms">
+      <a class="algo-link" href="#home" id="home-link"><span>Overview</span></a>
+      <div id="algo-index"></div>
+    </aside>
+    <section id="algo-main" aria-live="polite"></section>
+  </div>
+</main>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<script src="/js/firebase-client.js"></script>
+<script src="/js/cf-api.js"></script>
+<script src="/js/cf-store.js"></script>
+<script src="/js/auth.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="/js/algo/core.js"></script>
+<script src="/js/algo/fundamentals.js"></script>
+<script src="/js/algo/data-structures.js"></script>
+<script src="/js/algo/graphs.js"></script>
+<script src="/js/algo/dp-math-strings.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  const esc = CFStore.esc;
+  const READ_KEY = 'algo_read';
+  const PROB_KEY = 'algo_problems_done';
+  let _solvedCF = {};       // key -> true (from Codeforces sync)
+  let _handle   = '';
+
+  const byId = {};
+  ALGO.forEach(function (a) { byId[a.id] = a; });
+  // Stable order: by category order, then registration order
+  ALGO.sort(function (a, b) { return ALGO_CATS.indexOf(a.cat) - ALGO_CATS.indexOf(b.cat); });
+
+  function _get(key) { try { return JSON.parse(localStorage.getItem(key)) || {}; } catch (_) { return {}; } }
+  function _set(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch (_) {} }
+
+  function _probId(p) { return p.key || p.url; }
+  function _isDone(p) { return !!(_get(PROB_KEY)[_probId(p)] || (p.key && _solvedCF[p.key])); }
+  function _progress(a) {
+    const done = a.problems.filter(_isDone).length;
+    return { done: done, total: a.problems.length };
+  }
+
+  /* ── sidebar ─────────────────────────────────────────────── */
+  function _renderIndex(filter) {
+    filter = (filter || '').toLowerCase();
+    const read = _get(READ_KEY);
+    let html = '';
+    ALGO_CATS.forEach(function (cat) {
+      const items = ALGO.filter(function (a) {
+        return a.cat === cat && (!filter || (a.title + ' ' + a.summary).toLowerCase().indexOf(filter) !== -1);
+      });
+      if (!items.length) return;
+      html += '<div class="algo-cat">' + esc(cat) + '</div>';
+      items.forEach(function (a) {
+        const pr = _progress(a);
+        html += '<a class="algo-link" data-id="' + a.id + '" href="#' + a.id + '"><span>' + esc(a.title) + '</span>' +
+                (read[a.id] ? '<span class="tick">&#10003;</span>' : '<span class="loading-text" style="font-size:11px;font-style:normal;">' + pr.done + '/' + pr.total + '</span>') + '</a>';
+      });
+    });
+    document.getElementById('algo-index').innerHTML = html || '<p class="loading-text" style="padding:6px;">No matches.</p>';
+    _markActive();
+  }
+
+  function _markActive() {
+    const id = location.hash.slice(1) || 'home';
+    document.querySelectorAll('.algo-link').forEach(function (l) {
+      l.classList.toggle('active', l.getAttribute('data-id') === id || (id === 'home' && l.id === 'home-link'));
+    });
+  }
+
+  /* ── home ────────────────────────────────────────────────── */
+  function _renderHome() {
+    let doneP = 0, totalP = 0;
+    ALGO.forEach(function (a) { const p = _progress(a); doneP += p.done; totalP += p.total; });
+    const read = _get(READ_KEY);
+    const nRead = ALGO.filter(function (a) { return read[a.id]; }).length;
+
+    let html = '<div class="algo-article"><h1>Algorithm Guide</h1>' +
+      '<p style="color:var(--text-secondary);">' + ALGO.length + ' topics, each with the core idea, a C++ template you can paste into a contest, and hand-picked practice problems.</p>' +
+      '<div class="gym-summary" style="margin:16px 0 8px;grid-template-columns:repeat(3,1fr);">' +
+        '<div class="stat-card"><div class="k">Topics read</div><div class="v">' + nRead + '/' + ALGO.length + '</div></div>' +
+        '<div class="stat-card"><div class="k">Problems done</div><div class="v">' + doneP + '/' + totalP + '</div></div>' +
+        '<div class="stat-card"><div class="k">Codeforces sync</div><div class="v" style="font-size:15px;padding-top:6px;" id="sync-state">' + (_handle ? 'handle: ' + esc(_handle) : 'no handle set') + '</div></div>' +
+      '</div>' +
+      '<p class="loading-text">Solved Codeforces problems are ticked automatically from your handle. CSES ones you can tick yourself.</p>';
+
+    ALGO_CATS.forEach(function (cat) {
+      const items = ALGO.filter(function (a) { return a.cat === cat; });
+      if (!items.length) return;
+      html += '<h2>' + esc(cat) + '</h2><div class="algo-home-grid">' + items.map(function (a) {
+        const pr = _progress(a);
+        return '<a class="algo-card" href="#' + a.id + '"><b>' + esc(a.title) + '</b><span>' + esc(a.summary) + '</span>' +
+               '<div style="margin-top:8px;" class="bar"><span style="width:' + (pr.total ? pr.done / pr.total * 100 : 0) + '%"></span></div></a>';
+      }).join('') + '</div>';
+    });
+    html += '</div>';
+    document.getElementById('algo-main').innerHTML = html;
+  }
+
+  /* ── article ─────────────────────────────────────────────── */
+  function _renderArticle(a, keepScroll) {
+    const read = _get(READ_KEY);
+    const i = ALGO.indexOf(a);
+    const prev = ALGO[i - 1], next = ALGO[i + 1];
+    const stars = ['', 'Beginner', 'Intermediate', 'Advanced'][a.level] || '';
+
+    const rows = a.problems.map(function (p, n) {
+      const done = _isDone(p);
+      const auto = p.key && _solvedCF[p.key];
+      return '<tr class="' + (done ? 'solved-row' : '') + '">' +
+        '<td style="width:34px;"><input type="checkbox" data-prob="' + n + '"' + (done ? ' checked' : '') + (auto ? ' disabled title="Solved on Codeforces"' : '') + '></td>' +
+        '<td><a href="' + esc(p.url) + '" target="_blank" rel="noopener">' + esc(p.name) + '</a></td>' +
+        '<td style="width:80px;"><span class="chip ' + (p.site === 'CF' ? 'chip-accent' : '') + '">' + p.site + '</span></td></tr>';
+    }).join('');
+
+    document.getElementById('algo-main').innerHTML =
+      '<article class="algo-article">' +
+        '<div class="chip chip-accent" style="margin-bottom:8px;">' + esc(a.cat) + '</div>' +
+        '<h1>' + esc(a.title) + '</h1>' +
+        '<p style="color:var(--text-secondary);">' + esc(a.summary) + '</p>' +
+        '<div class="meta-row"><span class="chip">' + stars + '</span></div>' +
+        '<div class="complexity"><div>Time<b>' + a.time + '</b></div><div>Space<b>' + a.space + '</b></div></div>' +
+        a.body +
+        '<h2>Implementation (C++17)</h2>' +
+        '<div class="codeblock"><div class="cb-actions"><button type="button" id="copy-btn">Copy</button><button type="button" id="try-btn">Try in Compiler</button></div>' +
+          '<pre><code class="language-cpp">' + esc(a.code) + '</code></pre></div>' +
+        '<h2>Practice problems</h2>' +
+        '<table class="practice-table"><tbody>' + rows + '</tbody></table>' +
+        '<div class="toolbar-row" style="margin-top:16px;">' +
+          '<button type="button" id="read-btn" class="' + (read[a.id] ? '' : 'btn-primary') + '">' + (read[a.id] ? '&#10003; Marked as read' : 'Mark as read') + '</button>' +
+        '</div>' +
+        '<div class="algo-nav">' +
+          (prev ? '<a class="btn" href="#' + prev.id + '">&larr; ' + esc(prev.title) + '</a>' : '<span></span>') +
+          (next ? '<a class="btn" href="#' + next.id + '">' + esc(next.title) + ' &rarr;</a>' : '<span></span>') +
+        '</div>' +
+      '</article>';
+
+    if (window.hljs) document.querySelectorAll('pre code').forEach(function (el) { hljs.highlightElement(el); });
+
+    document.getElementById('copy-btn').addEventListener('click', function () {
+      navigator.clipboard.writeText(a.code).then(function () {
+        const b = document.getElementById('copy-btn'); b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1200);
+      });
+    });
+    document.getElementById('try-btn').addEventListener('click', function () {
+      CFStore.openInCompiler({ code: '#include <bits/stdc++.h>\nusing namespace std;\n\n' + a.code + '\n\nint main() {\n    ios_base::sync_with_stdio(false);\n    cin.tie(NULL);\n\n    return 0;\n}\n', language: 'cpp-g++-15' });
+    });
+    document.getElementById('read-btn').addEventListener('click', function () {
+      const r = _get(READ_KEY); r[a.id] = !r[a.id]; _set(READ_KEY, r);
+      _renderArticle(a); _renderIndex(document.getElementById('algo-search').value);
+    });
+    document.querySelectorAll('input[data-prob]').forEach(function (cb) {
+      cb.addEventListener('change', function () {
+        const p = a.problems[Number(cb.getAttribute('data-prob'))];
+        const d = _get(PROB_KEY); d[_probId(p)] = cb.checked; _set(PROB_KEY, d);
+        cb.closest('tr').classList.toggle('solved-row', cb.checked);
+        _renderIndex(document.getElementById('algo-search').value);
+      });
+    });
+    if (!keepScroll) window.scrollTo({ top: 0 });
+  }
+
+  /* ── routing ─────────────────────────────────────────────── */
+  function _route(keepScroll) {
+    const id = location.hash.slice(1);
+    if (id && byId[id]) { document.title = byId[id].title + ' — Algorithm Guide'; _renderArticle(byId[id], keepScroll === true); }
+    else { document.title = 'Algorithm Guide — CF Weakness Tracker'; _renderHome(); }
+    _markActive();
+  }
+
+  window.addEventListener('DOMContentLoaded', async function () {
+    const session = await Auth.initPage(true);
+    if (!session) return;
+
+    _renderIndex('');
+    _route();
+    window.addEventListener('hashchange', function () { _route(); });
+    document.getElementById('algo-search').addEventListener('input', function () { _renderIndex(this.value); });
+
+    // Background: tick off solved Codeforces problems (cached, never blocks the page)
+    try {
+      _handle = await CFStore.getHandle(session);
+      if (_handle) {
+        const solved = await CFStore.getSolvedKeys(_handle, false);
+        Object.keys(solved).forEach(function (k) { _solvedCF[k] = true; });
+        _renderIndex(document.getElementById('algo-search').value);
+        _route(true);
+      }
+    } catch (_) { /* offline / CF down — manual ticking still works */ }
+  });
+})();
+</script>
+</body>
+</html>
