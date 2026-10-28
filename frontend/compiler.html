@@ -387,6 +387,9 @@
       <li><a href="/dashboard.html">Dashboard</a></li>
       <li><a href="/charts.html">Weakness Charts</a></li>
       <li><a href="/compiler.html" class="active">Compiler</a></li>
+      <li><a href="/gym.html">Gym</a></li>
+      <li><a href="/algorithms.html">Algorithms</a></li>
+      <li><a href="/debugger.html">Debugger</a></li>
       <li><a href="/subscription.html">Subscription</a></li>
       <li><a href="/profile.html">Profile</a></li>
       <li><a href="#" id="logout-btn">Logout</a></li>
@@ -612,7 +615,28 @@ const rl = () => lines[idx++].trim();
 
       document.getElementById('run-all-btn').disabled = false;
       document.getElementById('run-btn-toolbar').disabled = false;
+
+      _applyHandoff();
     });
+  }
+
+  /* ── Handoff from Debugger / Algorithms pages ───────────────────────── */
+  function _applyHandoff() {
+    let raw = null;
+    try {
+      raw = sessionStorage.getItem('cf_compiler_handoff');
+      sessionStorage.removeItem('cf_compiler_handoff');
+    } catch (_) {}
+    if (!raw) return;
+    try {
+      const h = JSON.parse(raw);
+      if (h.language && STARTERS[h.language]) {
+        document.getElementById('lang-select').value = h.language;
+        _setLanguage(h.language);
+      }
+      if (h.code) editor.setValue(h.code);
+      (h.testCases || []).forEach(function (tc) { _addTestCase({ input: tc.input, expected: tc.expected }); });
+    } catch (_) {}
   }
 
   /* ── Language switch ────────────────────────────────────────── */

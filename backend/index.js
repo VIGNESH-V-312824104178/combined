@@ -28,6 +28,7 @@ const subscriptionRoute  = require('./routes/subscription');
 const runCodeRoute       = require('./routes/run-code');
 const aiReviewRoute      = require('./routes/ai-review');
 const generateTestsRoute = require('./routes/generate-tests');
+const debugSubmissionRoute = require('./routes/debug-submission');
 
 const app  = express();
 const PORT = process.env.BACKEND_PORT || 3001;
@@ -80,6 +81,7 @@ app.use('/api/subscription',   subscriptionRoute);
 app.use('/api/run-code',       runCodeRoute);
 app.use('/api/ai-review',      aiReviewRoute);
 app.use('/api/generate-tests', generateTestsRoute);
+app.use('/api/debug-submission', debugSubmissionRoute);
 
 // ── 404 ───────────────────────────────────────────────────────
 app.use(function (req, res) {

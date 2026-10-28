@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CP Gym — CF Weakness Tracker</title>
+  <meta name="description" content="Daily adaptive Codeforces training: warm-up, target drill and boss fight, plus a per-topic skill tree that levels up as you solve.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/css/style.css">
+  <link rel="stylesheet" href="/css/features.css">
+</head>
+<body>
+
+<nav class="navbar" role="navigation" aria-label="Main navigation">
+  <div class="nav-inner">
+    <div class="nav-logo"><a href="/dashboard.html">CF Weakness Tracker</a></div>
+    <button class="hamburger" id="hamburger-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+    <ul class="nav-links" id="nav-links">
+      <li><a href="/dashboard.html">Dashboard</a></li>
+      <li><a href="/charts.html">Weakness Charts</a></li>
+      <li><a href="/compiler.html">Compiler</a></li>
+      <li><a href="/gym.html">Gym</a></li>
+      <li><a href="/algorithms.html">Algorithms</a></li>
+      <li><a href="/debugger.html">Debugger</a></li>
+      <li><a href="/subscription.html">Subscription</a></li>
+      <li><a href="/profile.html">Profile</a></li>
+      <li><a href="#" id="logout-btn">Logout</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main class="container">
+  <div class="page-head">
+    <h1>CP Gym</h1>
+    <p>Three quests a day, tuned to your rating and your weakest topics. Solve them on Codeforces, hit refresh, and watch your skill tree level up.</p>
+  </div>
+
+  <div id="gym-msg" class="msg-info" style="display:none;"></div>
+
+  <div id="gym-body" style="display:none;">
+    <div class="gym-summary">
+      <div class="stat-card"><div class="k">Player level</div><div class="v" id="s-level">—</div><div class="s" id="s-title"></div></div>
+      <div class="stat-card"><div class="k">Total XP</div><div class="v" id="s-xp">—</div><div class="s" id="s-xp-next"></div></div>
+      <div class="stat-card"><div class="k">Daily streak</div><div class="v" id="s-streak">—</div><div class="s" id="s-perfect"></div></div>
+      <div class="stat-card"><div class="k">Rating</div><div class="v" id="s-rating">—</div><div class="s" id="s-rank"></div></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Today's Quests</div>
+      <div class="panel-body">
+        <div class="toolbar-row" style="margin-bottom:14px;">
+          <span class="loading-text" id="plan-date"></span>
+          <span class="spacer"></span>
+          <span class="loading-text" id="fetched-at"></span>
+          <button id="refresh-btn" type="button">&#8635; Check progress</button>
+        </div>
+        <div class="quests" id="quests"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Skill Tree</div>
+      <div class="panel-body">
+        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+          XP comes from distinct problems you've solved (harder = more). Highlighted tiles are your weakest topics, and they're what the Target Drill pulls from.
+        </p>
+        <div class="skill-grid" id="skill-grid"></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<script src="/js/firebase-client.js"></script>
+<script src="/js/cf-api.js"></script>
+<script src="/js/cf-store.js"></script>
+<script src="/js/auth.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  const esc = CFStore.esc;
+  const TITLES = ['Newcomer', 'Apprentice', 'Adept', 'Skilled', 'Veteran', 'Expert', 'Master', 'Grandmaster', 'Legend'];
+
+  let _handle = '';
+  let _data   = null;   // CFStore.getUserData result
+  let _pool   = null;   // problemset
+  let _plan   = null;   // today's plan
+
+  /* ── helpers ─────────────────────────────────────────────── */
+  function _dateStr(d) {
+    d = d || new Date();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return d.getFullYear() + '-' + m + '-' + day;
+  }
+  function _dayStartSec(dateStr) {
+    const p = dateStr.split('-').map(Number);
+    return Math.floor(new Date(p[0], p[1] - 1, p[2]).getTime() / 1000);
+  }
+  function _round100(x) { return Math.round(x / 100) * 100; }
+  function _weight(rating) { return Math.max(8, (rating || 800) / 100); }
+
+  function _store(key, val) {
+    if (val === undefined) {
+      try { return JSON.parse(localStorage.getItem(key)); } catch (_) { return null; }
+    }
+    localStorage.setItem(key, JSON.stringify(val));
+  }
+  const _planKey   = () => 'gym_plans_'  + _handle.toLowerCase();
+  const _manualKey = () => 'gym_manual_' + _handle.toLowerCase();
+
+  /* ── skill tree maths ────────────────────────────────────── */
+  function _computeSkills(d) {
+    const stats = {};
+    Object.keys(d.attempted).forEach(function (k) {
+      (d.tagsOf[k] || []).forEach(function (t) {
+        if (t.charAt(0) === '*') return;
+        const s = stats[t] || (stats[t] = { tag: t, att: 0, sol: 0, xp: 0 });
+        s.att++;
+        if (d.solved[k]) { s.sol++; s.xp += _weight(d.ratingOf[k]); }
+      });
+    });
+    return Object.keys(stats).map(function (t) {
+      const s = stats[t];
+      s.level = Math.floor(Math.sqrt(s.xp / 10));
+      const cur = 10 * s.level * s.level, nxt = 10 * (s.level + 1) * (s.level + 1);
+      s.progress = Math.min(1, (s.xp - cur) / (nxt - cur));
+      s.weakness = s.att >= 4 ? (1 - s.sol / s.att) * 0.6 + (1 - Math.min(s.level, 8) / 8) * 0.4 : 0;
+      return s;
+    });
+  }
+
+  function _totals(d) {
+    let xp = 0;
+    Object.keys(d.solved).forEach(function (k) { xp += _weight(d.ratingOf[k]); });
+    const lvl = Math.floor(Math.sqrt(xp / 40));
+    return { xp: Math.round(xp), level: lvl, next: 40 * (lvl + 1) * (lvl + 1) };
+  }
+
+  /* ── plan generation ─────────────────────────────────────── */
+  function _slim(p) {
+    return { key: p.key, contestId: p.contestId, index: p.index, name: p.name, rating: p.rating, tags: p.tags };
+  }
+
+  function _pick(opts) {
+    // opts: { lo, hi, tag, exclude:Set, rng }
+    let lo = opts.lo, hi = opts.hi, cands = [];
+    for (let widen = 0; widen < 4 && cands.length < 5; widen++) {
+      cands = _pool.filter(function (p) {
+        return p.rating >= Math.max(800, lo - widen * 100) && p.rating <= hi + widen * 100 &&
+               !_data.solved[p.key] && !opts.exclude.has(p.key) && p.solved >= 300 &&
+               (!opts.tag || p.tags.indexOf(opts.tag) !== -1);
+      });
+    }
+    if (!cands.length) return null;
+    cands.sort(function (a, b) { return b.solved - a.solved; });
+    const top = cands.slice(0, 40);
+    return _slim(top[Math.floor(opts.rng() * top.length)]);
+  }
+
+  function _slotSpec(slot, skills) {
+    const r = _data.rating || 1000;
+    const weak = skills.filter(function (s) { return s.weakness > 0; })
+                       .sort(function (a, b) { return b.weakness - a.weakness; });
+    if (slot === 'warmup') return { lo: _round100(r - 250), hi: _round100(r - 50), tag: null };
+    if (slot === 'target') return { lo: _round100(r - 50),  hi: _round100(r + 150), tag: (weak[0] ? weak[0].tag : 'implementation') };
+    return { lo: _round100(r + 150), hi: _round100(r + 350), tag: weak[1] ? weak[1].tag : null };
+  }
+
+  function _generateSlot(slot, dateStr, nonce, skills, existing) {
+    const spec = _slotSpec(slot, skills);
+    const exclude = new Set(existing);
+    // Avoid repeating anything planned in the last weeks
+    const all = _store(_planKey()) || {};
+    Object.keys(all).forEach(function (d) {
+      ['warmup', 'target', 'boss'].forEach(function (s) { if (all[d][s]) exclude.add(all[d][s].key); });
+    });
+    const rng = CFStore.seeded(_handle + '|' + dateStr + '|' + slot + '|' + nonce);
+    return _pick({ lo: spec.lo, hi: spec.hi, tag: spec.tag, exclude: exclude, rng: rng }) ||
+           _pick({ lo: spec.lo, hi: spec.hi, tag: null, exclude: exclude, rng: rng });
+  }
+
+  function _ensurePlan(skills) {
+    const today = _dateStr();
+    const all = _store(_planKey()) || {};
+    let plan = all[today];
+    if (!plan) {
+      plan = { rerolls: { warmup: 0, target: 0, boss: 0 } };
+      const used = [];
+      ['warmup', 'target', 'boss'].forEach(function (slot) {
+        const p = _generateSlot(slot, today, 0, skills, used);
+        plan[slot] = p;
+        if (p) used.push(p.key);
+      });
+      all[today] = plan;
+      // keep ~60 days
+      Object.keys(all).sort().slice(0, -60).forEach(function (k) { delete all[k]; });
+      _store(_planKey(), all);
+    }
+    return plan;
+  }
+
+  function _reroll(slot) {
+    const today = _dateStr();
+    const all = _store(_planKey()) || {};
+    const plan = all[today];
+    if (!plan) return;
+    plan.rerolls[slot] = (plan.rerolls[slot] || 0) + 1;
+    const used = ['warmup', 'target', 'boss'].filter(function (s) { return s !== slot && plan[s]; })
+                                              .map(function (s) { return plan[s].key; });
+    if (plan[slot]) used.push(plan[slot].key);
+    const p = _generateSlot(slot, today, plan.rerolls[slot], _computeSkills(_data), used);
+    if (p) plan[slot] = p;
+    _store(_planKey(), all);
+    _plan = plan;
+    _render();
+  }
+
+  /* ── completion / streak ─────────────────────────────────── */
+  function _isDone(dateStr, slot, p) {
+    if (!p) return false;
+    const manual = _store(_manualKey()) || {};
+    if (manual[dateStr + '|' + slot]) return true;
+    const t = _data.solved[p.key];
+    return !!t && t >= _dayStartSec(dateStr);
+  }
+
+  function _streaks() {
+    const all = _store(_planKey()) || {};
+    let streak = 0, perfect = 0;
+    const d = new Date();
+    const todayDone = ['warmup', 'target', 'boss'].some(function (s) {
+      return all[_dateStr(d)] && _isDone(_dateStr(d), s, all[_dateStr(d)][s]);
+    });
+    if (!todayDone) d.setDate(d.getDate() - 1);
+    for (let i = 0; i < 400; i++) {
+      const ds = _dateStr(d), plan = all[ds];
+      if (!plan) break;
+      const n = ['warmup', 'target', 'boss'].filter(function (s) { return _isDone(ds, s, plan[s]); }).length;
+      if (n === 0) break;
+      streak++;
+      d.setDate(d.getDate() - 1);
+    }
+    Object.keys(all).forEach(function (ds) {
+      const plan = all[ds];
+      if (['warmup', 'target', 'boss'].every(function (s) { return _isDone(ds, s, plan[s]); })) perfect++;
+    });
+    return { streak: streak, perfect: perfect };
+  }
+
+  /* ── rendering ───────────────────────────────────────────── */
+  const KIND = {
+    warmup: { label: 'Warm-up',      blurb: 'Easy win to get the brain moving.' },
+    target: { label: 'Target drill', blurb: 'Aimed at your weakest topic.' },
+    boss:   { label: 'Boss fight',   blurb: 'Stretch problem to break a plateau.' }
+  };
+
+  function _render() {
+    const skills = _computeSkills(_data);
+    const tot = _totals(_data);
+    const st  = _streaks();
+    const today = _dateStr();
+
+    document.getElementById('s-level').textContent = tot.level;
+    document.getElementById('s-title').textContent = TITLES[Math.min(tot.level, TITLES.length - 1)];
+    document.getElementById('s-xp').textContent    = tot.xp.toLocaleString();
+    document.getElementById('s-xp-next').textContent = (tot.next - tot.xp) + ' XP to level ' + (tot.level + 1);
+    document.getElementById('s-streak').textContent  = st.streak + (st.streak === 1 ? ' day' : ' days');
+    document.getElementById('s-perfect').textContent = st.perfect + ' perfect day' + (st.perfect === 1 ? '' : 's');
+    document.getElementById('s-rating').textContent  = _data.rating || 'unrated';
+    document.getElementById('s-rank').textContent    = _data.rank;
+    document.getElementById('plan-date').textContent = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+    document.getElementById('fetched-at').textContent = 'Synced ' + new Date(_data.fetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    // quests
+    const manual = _store(_manualKey()) || {};
+    document.getElementById('quests').innerHTML = ['warmup', 'target', 'boss'].map(function (slot) {
+      const p = _plan[slot], k = KIND[slot];
+      if (!p) return '<div class="quest ' + slot + '"><div class="q-kind">' + k.label + '</div><p class="loading-text">No suitable problem found — try Check progress.</p></div>';
+      const done = _isDone(today, slot, p);
+      return '<div class="quest ' + slot + (done ? ' done' : '') + '">' +
+        '<span class="q-xp">+' + Math.round(_weight(p.rating)) + ' XP</span>' +
+        '<div class="q-kind">' + k.label + (done ? ' · complete' : '') + '</div>' +
+        '<h3>' + esc(p.index) + '. ' + esc(p.name) + '</h3>' +
+        '<div class="q-tags"><span class="chip chip-accent">' + p.rating + '</span>' +
+          p.tags.slice(0, 4).map(function (t) { return '<span class="chip">' + esc(t) + '</span>'; }).join('') + '</div>' +
+        '<p style="font-size:12.5px;color:var(--text-secondary);">' + k.blurb + '</p>' +
+        '<div class="q-actions">' +
+          '<a class="btn btn-primary" target="_blank" rel="noopener" href="' + CFStore.problemUrl(p) + '">Solve on Codeforces</a>' +
+          (done ? '' : '<button type="button" data-reroll="' + slot + '">Re-roll</button>' +
+                       '<button type="button" data-manual="' + slot + '">Mark done</button>') +
+        '</div></div>';
+    }).join('');
+
+    // skill grid
+    const weakTags = new Set(skills.filter(function (s) { return s.weakness > 0; })
+                                   .sort(function (a, b) { return b.weakness - a.weakness; })
+                                   .slice(0, 3).map(function (s) { return s.tag; }));
+    skills.sort(function (a, b) { return b.xp - a.xp; });
+    document.getElementById('skill-grid').innerHTML = skills.map(function (s) {
+      return '<div class="skill' + (weakTags.has(s.tag) ? ' weak' : '') + '">' +
+        '<div class="top"><span class="name">' + esc(s.tag) + '</span><span class="lvl">Lv ' + s.level + '</span></div>' +
+        '<div class="bar"><span style="width:' + Math.round(s.progress * 100) + '%"></span></div>' +
+        '<div class="meta"><span>' + s.sol + '/' + s.att + ' solved</span><span>' + Math.round(s.xp) + ' XP</span></div>' +
+      '</div>';
+    }).join('');
+  }
+
+  /* ── load ────────────────────────────────────────────────── */
+  async function _load(force) {
+    const btn = document.getElementById('refresh-btn');
+    btn.disabled = true;
+    try {
+      [_data, _pool] = await Promise.all([
+        CFStore.getUserData(_handle, force),
+        CFStore.getProblemset(false)
+      ]);
+      _plan = _ensurePlan(_computeSkills(_data));
+      document.getElementById('gym-body').style.display = 'block';
+      Auth.hideMsg('gym-msg');
+      _render();
+    } catch (e) {
+      Auth.showMsg('gym-msg', 'Could not load Codeforces data: ' + e.message, 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  window.addEventListener('DOMContentLoaded', async function () {
+    const session = await Auth.initPage(true);
+    if (!session) return;
+
+    try { _handle = await CFStore.getHandle(session); } catch (_) {}
+    if (!_handle) {
+      Auth.showMsg('gym-msg', 'Set your Codeforces handle on the Dashboard first, then come back.', 'warn');
+      return;
+    }
+    Auth.showMsg('gym-msg', 'Loading your training plan…', 'info');
+    await _load(false);
+
+    document.getElementById('refresh-btn').addEventListener('click', function () { _load(true); });
+    document.getElementById('quests').addEventListener('click', function (e) {
+      const r = e.target.getAttribute('data-reroll');
+      const m = e.target.getAttribute('data-manual');
+      if (r) _reroll(r);
+      if (m) {
+        const manual = _store(_manualKey()) || {};
+        manual[_dateStr() + '|' + m] = true;
+        _store(_manualKey(), manual);
+        _render();
+      }
+    });
+
+    // Auto-check when returning from a Codeforces tab
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible' && _data && Date.now() - _data.fetchedAt > 120000) _load(true);
+    });
+  });
+})();
+</script>
+</body>
+</html>
